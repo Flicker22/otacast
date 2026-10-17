@@ -1,189 +1,204 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::{Client, config::Region};
-use base64::{Engine as _, engine::general_purpose};
+mod env_config;
+mod object_url;
+mod s3_config;
+mod s3_transport;
+mod upload;
+mod upload_progress;
+mod upload_store;
+
 use md5::{Digest, Md5};
-use serde::Serialize;
+use s3_config::{PublicS3Config, S3Config};
+use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct FileInfo {
     file_name: String,
     file_size: u64,
-    md5_hash: String,
+    modified_at: String,
 }
 
 #[derive(Debug, Serialize)]
 struct UploadResult {
-    file_name: String,
-    file_size: u64,
-    md5_hash: String,
+    file_info: FileInfo,
     s3_key: String,
+    file_url: String,
     etag: String,
+    verification: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Md5Result {
+    md5_hash: String,
+    md5_url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
 enum AppError {
     #[error("IO错误: {0}")]
     Io(#[from] std::io::Error),
-    #[error("AWS S3错误: {0}")]
-    S3(String),
     #[error("配置错误: {0}")]
     Config(String),
 }
 
-// 内部实现
-async fn get_file_info_impl(file_path: String) -> Result<FileInfo, AppError> {
-    let path = Path::new(&file_path);
-    let file_name = path
-        .file_name()
-        .ok_or_else(|| AppError::Config("无效的文件路径".to_string()))?
-        .to_string_lossy()
-        .to_string();
-
-    let metadata = tokio::fs::metadata(&file_path).await?;
-    let file_size = metadata.len();
-
-    // 计算 MD5 (使用阻塞线程避免UI卡顿)
-    let path_clone = file_path.clone();
-    let md5_hash = tokio::task::spawn_blocking(move || -> Result<String, AppError> {
-        let file = File::open(&path_clone)?;
-        let mut reader = BufReader::new(file);
-        let mut hasher = Md5::new();
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
-        }
-
-        Ok(hex::encode(hasher.finalize()))
-    })
-    .await
-    .map_err(|e| AppError::Config(format!("计算任务失败: {}", e)))??;
-
+fn file_info(file_path: &Path, metadata: &std::fs::Metadata) -> Result<FileInfo, AppError> {
+    if !metadata.is_file() {
+        return Err(AppError::Config("请选择一个普通文件".into()));
+    }
     Ok(FileInfo {
-        file_name,
-        file_size,
-        md5_hash,
+        file_name: file_path
+            .file_name()
+            .ok_or_else(|| AppError::Config("无效的文件路径".into()))?
+            .to_string_lossy()
+            .to_string(),
+        file_size: metadata.len(),
+        modified_at: metadata
+            .modified()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| AppError::Config("文件修改时间无效".into()))?
+            .as_nanos()
+            .to_string(),
     })
 }
 
-// Tauri 命令 - 返回 String 错误以便序列化
+async fn get_file_info_impl(file_path: &str) -> Result<FileInfo, AppError> {
+    file_info(Path::new(file_path), &tokio::fs::metadata(file_path).await?)
+}
+
 #[tauri::command]
 async fn get_file_info(file_path: String) -> Result<FileInfo, String> {
-    get_file_info_impl(file_path).await.map_err(|e| e.to_string())
+    get_file_info_impl(&file_path)
+        .await
+        .map_err(|error| error.to_string())
 }
 
-// 内部实现
-async fn upload_file_impl(
-    file_path: String,
-    bucket: String,
-    key: String,
-    region: String,
-    access_key: String,
-    secret_key: String,
-) -> Result<UploadResult, AppError> {
-    // 获取文件信息
-    let file_info = get_file_info_impl(file_path.clone()).await?;
+#[tauri::command]
+fn get_s3_config() -> Result<PublicS3Config, String> {
+    S3Config::load().map(PublicS3Config::from)
+}
 
-    // 计算 Base64 MD5 (S3 Content-MD5 头需要)
-    let path_clone = file_path.clone();
-    let md5_base64 = tokio::task::spawn_blocking(move || -> Result<String, AppError> {
-        let file = File::open(&path_clone)?;
-        let mut reader = BufReader::new(file);
-        let mut hasher = Md5::new();
-        let mut buffer = [0u8; 8192];
-
-        loop {
-            let count = reader.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            hasher.update(&buffer[..count]);
+fn calculate_md5_impl(
+    file_path: &str,
+    expected_size: u64,
+    expected_modified: &str,
+    file_url: &str,
+) -> Result<Md5Result, AppError> {
+    let file = File::open(file_path)?;
+    let before = file_info(Path::new(file_path), &file.metadata()?)?;
+    if before.file_size != expected_size || before.modified_at != expected_modified {
+        return Err(AppError::Config(
+            "本地文件已变化，请重新上传后再计算 MD5".into(),
+        ));
+    }
+    let mut reader = BufReader::new(file);
+    let mut hasher = Md5::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let count = reader.read(&mut buffer)?;
+        if count == 0 {
+            break;
         }
+        hasher.update(&buffer[..count]);
+    }
+    if file_info(Path::new(file_path), &reader.get_ref().metadata()?)? != before {
+        return Err(AppError::Config(
+            "文件在计算过程中发生变化，请重新上传".into(),
+        ));
+    }
+    let md5_hash = hex::encode(hasher.finalize());
+    let md5_url = object_url::md5_url(file_url, &md5_hash).map_err(AppError::Config)?;
+    Ok(Md5Result { md5_hash, md5_url })
+}
 
-        Ok(general_purpose::STANDARD.encode(hasher.finalize()))
+#[tauri::command]
+async fn calculate_md5(
+    file_path: String,
+    expected_size: u64,
+    expected_modified: String,
+    file_url: String,
+) -> Result<Md5Result, String> {
+    tokio::task::spawn_blocking(move || {
+        calculate_md5_impl(&file_path, expected_size, &expected_modified, &file_url)
     })
     .await
-    .map_err(|e| AppError::Config(format!("计算任务失败: {}", e)))??;
-
-    // 配置 AWS 客户端
-    let creds = aws_sdk_s3::config::Credentials::new(
-        access_key,
-        secret_key,
-        None,
-        None,
-        "manual-input",
-    );
-
-    let config = aws_sdk_s3::config::Builder::new()
-        .region(Region::new(region))
-        .credentials_provider(creds)
-        .behavior_version(aws_sdk_s3::config::BehaviorVersion::latest())
-        .build();
-
-    let client = Client::from_conf(config);
-
-    // 读取文件流
-    let body = ByteStream::from_path(Path::new(&file_path))
-        .await
-        .map_err(|e| AppError::Io(std::io::Error::new(std::io::ErrorKind::Other, e)))?;
-
-    // 执行上传 - 使用 match 处理错误
-    let resp = match client
-        .put_object()
-        .bucket(&bucket)
-        .key(&key)
-        .body(body)
-        .content_md5(&md5_base64)
-        .content_length(file_info.file_size as i64)
-        .send()
-        .await {
-            Ok(response) => response,
-            Err(e) => {
-                return Err(AppError::S3(format!("上传失败: {}", e)));
-            }
-        };
-
-    Ok(UploadResult {
-        file_name: file_info.file_name,
-        file_size: file_info.file_size,
-        md5_hash: file_info.md5_hash,
-        s3_key: key,
-        etag: resp.e_tag.unwrap_or_default(),
-    })
-}
-
-// Tauri 命令 - 返回 String 错误以便序列化
-#[tauri::command]
-async fn upload_file_to_s3(
-    file_path: String,
-    bucket: String,
-    key: String,
-    region: String,
-    access_key: String,
-    secret_key: String,
-) -> Result<UploadResult, String> {
-    upload_file_impl(file_path, bucket, key, region, access_key, secret_key)
-        .await
-        .map_err(|e| e.to_string())
+    .map_err(|_| "MD5 计算任务失败".to_string())?
+    .map_err(|error| error.to_string())
 }
 
 fn main() {
     tauri::Builder::default()
+        .manage(upload::UploadManager::default())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             get_file_info,
-            upload_file_to_s3
+            get_s3_config,
+            upload::upload_file_to_s3,
+            upload::resume_upload,
+            upload::list_upload_tasks,
+            upload::control_upload,
+            upload::discard_upload,
+            calculate_md5
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn selecting_file_only_reads_metadata_and_md5_is_computed_on_demand() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), b"hello").unwrap();
+        let path = file.path().to_str().unwrap();
+        let info = get_file_info_impl(path).await.unwrap();
+        assert_eq!(info.file_size, 5);
+        let result = calculate_md5_impl(
+            path,
+            info.file_size,
+            &info.modified_at,
+            "https://cdn.example.com/firmware.bin",
+        )
+        .unwrap();
+        assert_eq!(result.md5_hash, "5d41402abc4b2a76b9719d911017c592");
+        assert_eq!(
+            result.md5_url,
+            "https://cdn.example.com/firmware.bin?md5=5d41402abc4b2a76b9719d911017c592"
+        );
+        std::fs::write(file.path(), b"modified firmware").unwrap();
+        assert!(calculate_md5_impl(
+            path,
+            info.file_size,
+            &info.modified_at,
+            "https://cdn.example.com/firmware.bin"
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("本地文件已变化"));
+    }
+
+    #[tokio::test]
+    async fn supports_empty_file_md5_and_rejects_directories() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let path = file.path().to_str().unwrap();
+        let info = get_file_info_impl(path).await.unwrap();
+        let result = calculate_md5_impl(
+            path,
+            0,
+            &info.modified_at,
+            "https://cdn.example.com/empty.bin",
+        )
+        .unwrap();
+        assert_eq!(result.md5_hash, "d41d8cd98f00b204e9800998ecf8427e");
+        let directory = tempfile::tempdir().unwrap();
+        assert!(get_file_info_impl(directory.path().to_str().unwrap())
+            .await
+            .is_err());
+    }
 }
