@@ -4,6 +4,8 @@ body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Ro
 header { margin-bottom: 30px; }
 header h1 { margin: 0 0 10px; font-size: 1.8rem; letter-spacing: -.04em; }
 header p { margin: 0; color: #65748a; line-height: 1.6; }
+.page-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 10px; }
+.page-heading h1 { margin-bottom: 0; }
 .card { background: white; border: 1px solid #e4e9ef; border-radius: 12px; padding: 24px; margin-bottom: 20px; box-shadow: 0 3px 10px #172d4810; }
 .card h2 { display: flex; align-items: center; gap: 12px; margin: 0 0 22px; font-size: 1.1rem; }
 .step { display: inline-flex; justify-content: center; align-items: center; width: 28px; height: 28px; border-radius: 8px; background: #edf3fc; color: #2864bb; font-size: .9rem; }
@@ -65,3 +67,30 @@ code.hash { display: block; width: fit-content; max-width: 100%; padding: 10px 1
 .verification-success { color: #21845b; font-size: .88rem; line-height: 1.7; }
 .recovery-task { margin-top: 16px; padding: 16px; background: #f6f8fb; border-radius: 8px; overflow-wrap: anywhere; }
 .recovery-task > p { font-size: .85rem; line-height: 1.6; }
+
+.sheet { position: fixed; inset: 0 0 0 auto; margin: 0; padding: 0; width: min(560px, 100%); height: 100%; height: 100dvh; max-width: 100%; max-height: 100%; border: 0; border-left: 1px solid #e4e9ef; background: #fff; color: #27364b; box-shadow: -8px 0 32px #172d4826; }
+.sheet[open] { display: flex; flex-direction: column; }
+.sheet::backdrop { background: #172d4873; }
+.sheet-header { display: flex; align-items: flex-start; gap: 16px; padding: 24px; border-bottom: 1px solid #e4e9ef; }
+.sheet-header h2 { margin: 0 0 10px; font-size: 1.2rem; }
+.sheet-header p { margin: 0; color: #65748a; font-size: .85rem; line-height: 1.7; }
+.sheet-close { flex-shrink: 0; margin-left: auto; }
+.sheet-toolbar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 24px; background: #f6f8fb; color: #65748a; font-size: .85rem; }
+.sheet-content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 24px 24px; }
+.log-empty { margin-top: 36px; color: #65748a; text-align: center; font-size: .9rem; }
+.log-entry { padding: 16px 0; border-bottom: 1px solid #e4e9ef; }
+.log-entry-meta { display: flex; align-items: center; gap: 10px; color: #65748a; font-size: .75rem; font-variant-numeric: tabular-nums; }
+.log-level { padding: 2px 6px; border-radius: 4px; background: #edf3fc; color: #2864bb; }
+.log-entry-success .log-level { background: #e6f5ed; color: #1b7a51; }
+.log-entry-warning .log-level { background: #fff4db; color: #956000; }
+.log-entry-error .log-level { background: #fff0ef; color: #a1372c; }
+.log-entry p { margin: 8px 0 0; font-size: .87rem; line-height: 1.7; white-space: pre-wrap; overflow-wrap: anywhere; }
+@media (max-width: 520px) {
+  .sheet-header { padding: 20px 16px; }
+  .sheet-toolbar { padding: 12px 16px; }
+  .sheet-content { padding: 0 16px 20px; }
+}
+
+.page-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.task-toolbar { flex-wrap: wrap; }
+.task-list .inline-error, .task-list .copy-notice { overflow-wrap: anywhere; line-height: 1.7; }

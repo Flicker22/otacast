@@ -46,6 +46,120 @@ fn observer() -> Observer {
     Arc::new(|_| {})
 }
 
+fn test_settings() -> S3Config {
+    S3Config {
+        bucket: "test-bucket".into(),
+        region: "us-east-1".into(),
+        access_key: "test-access".into(),
+        secret_key: "test-secret".into(),
+        session_token: None,
+        endpoint: None,
+        force_path_style: true,
+        key_prefix: String::new(),
+        public_base_url: None,
+        connect_ips: Vec::new(),
+        stall_grace_seconds: 60,
+        part_size: PART_SIZE,
+        upload_concurrency: CONCURRENCY,
+        send_checksum_headers: true,
+    }
+}
+
+#[tokio::test]
+async fn discard_task_without_upload_id_never_loads_config_and_preserves_source_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_at(&dir);
+    for multipart in [false, true] {
+        for phase in [
+            "preparing",
+            "failed",
+            "paused",
+            "completing",
+            "verifying",
+            "cleanup_pending",
+        ] {
+            let mut task = task_at(&dir, 10).await;
+            task.multipart = multipart;
+            task.phase = phase.into();
+            store.save(&task).unwrap();
+            discard_task(&mut task, &store, || {
+                panic!("Local cleanup must not load S3 config")
+            })
+            .await
+            .unwrap();
+            assert!(store.list().unwrap().tasks.is_empty());
+            assert_eq!(std::fs::metadata(&task.file_path).unwrap().len(), 10);
+        }
+    }
+}
+
+#[tokio::test]
+async fn discard_task_with_upload_id_preserves_record_when_config_is_missing_or_changed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_at(&dir);
+    let mut task = task_at(&dir, 10).await;
+    task.upload_id = Some("upload-1".into());
+    store.save(&task).unwrap();
+    let original = serde_json::to_value(&task).unwrap();
+    assert!(
+        discard_task(&mut task, &store, || Err("缺少存储配置".into()))
+            .await
+            .unwrap_err()
+            .contains("缺少存储配置")
+    );
+    for field in ["bucket", "region", "endpoint", "force_path_style"] {
+        let mut settings = test_settings();
+        match field {
+            "bucket" => settings.bucket = "other-bucket".into(),
+            "region" => settings.region = "other-region".into(),
+            "endpoint" => settings.endpoint = Some("https://other.example.com".into()),
+            "force_path_style" => settings.force_path_style = false,
+            _ => unreachable!(),
+        }
+        let error = discard_task(&mut task, &store, || Ok(settings))
+            .await
+            .unwrap_err();
+        for expected in [
+            "S3_BUCKET=test-bucket",
+            "S3_REGION=us-east-1",
+            "S3_ENDPOINT=",
+            "S3_FORCE_PATH_STYLE=true",
+            "重新加载配置",
+        ] {
+            assert!(error.contains(expected), "{error}");
+        }
+        assert_eq!(serde_json::to_value(&task).unwrap(), original);
+        assert_eq!(
+            serde_json::to_value(store.load(ID).unwrap()).unwrap(),
+            original
+        );
+    }
+}
+
+#[tokio::test]
+async fn discard_task_with_matching_config_cleans_remote_upload_and_preserves_committed_object() {
+    let server = FakeS3::start(FakeState {
+        committed: true,
+        ..Default::default()
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_at(&dir);
+    let mut task = task_at(&dir, 10).await;
+    let mut settings = test_settings();
+    settings.endpoint = Some(server.endpoint.clone());
+    task.target = Target::from(&settings);
+    task.upload_id = Some("upload-1".into());
+    store.save(&task).unwrap();
+    discard_task(&mut task, &store, || Ok(settings))
+        .await
+        .unwrap();
+    assert!(store.list().unwrap().tasks.is_empty());
+    let state = server.state.lock().unwrap();
+    assert_eq!(state.aborted, 1);
+    assert!(state.committed);
+}
+
 #[derive(Default)]
 struct FakeState {
     parts: BTreeMap<i32, ReceivedBody>,
@@ -447,22 +561,8 @@ impl FakeS3 {
         }
     }
     fn client(&self) -> Client {
-        let settings = S3Config {
-            bucket: "test-bucket".into(),
-            region: "us-east-1".into(),
-            access_key: "test-access".into(),
-            secret_key: "test-secret".into(),
-            session_token: None,
-            endpoint: Some(self.endpoint.clone()),
-            force_path_style: true,
-            key_prefix: String::new(),
-            public_base_url: None,
-            connect_ips: Vec::new(),
-            stall_grace_seconds: 60,
-            part_size: PART_SIZE,
-            upload_concurrency: CONCURRENCY,
-            send_checksum_headers: true,
-        };
+        let mut settings = test_settings();
+        settings.endpoint = Some(self.endpoint.clone());
         client(&settings)
     }
 }

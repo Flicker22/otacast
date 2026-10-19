@@ -10,7 +10,13 @@
 
 重新选文件或重新上传会清除旧结果。MD5 计算会核对本地文件大小和修改时间；如果上传后文件已变化，需要重新上传。
 
+点击页面右上角的「运行日志」打开独立的 Sheet 侧边面板，查看本次运行的操作、上传阶段、提醒和错误。日志实时更新，最多保留最近 500 条，可手动清空；关闭面板后仍会继续记录。日志仅保存在内存中，退出软件后自动清空，不影响断点续传任务记录。
+
 ## 大文件上传与恢复
+
+页面右上角的「未完成的上传」打开独立的 Sheet 面板，可刷新任务、继续上传、单项「放弃并清理」或「清理全部任务」。批量清理依次处理每个任务，单项失败不影响其余任务，并展示失败原因供重试。清理会删除任务记录和未完成分片，之后无法续传；已提交的远端对象会保留。关闭面板或退出软件仍保留未清理的任务，便于下次继续。
+
+没有已记录的远端分片（没有上传 ID）的任务可直接清理，无需恢复旧配置或提供凭证。有远端分片的任务需要按面板显示的 Bucket、区域、服务地址和寻址方式，恢复 `.env` 中的 `S3_BUCKET`、`S3_REGION`、`S3_ENDPOINT`、`S3_FORCE_PATH_STYLE`，并提供有效凭证；点击「重新加载配置」后再清理。仅修改上传目录或 CDN 访问域名不会导致存储目标不匹配。
 
 - 大于 128MiB 使用 S3 multipart upload，每片 64MiB，最多同时上传 3 片；小文件使用单次 PUT。分片范围使用 64 位字节数，覆盖 2–6GB 文件。
 - 文件按 64KiB 缓冲区流式读取。每片先计算 SHA-256，再流式发送，不将整个文件或整个分片装入内存。SDK 统一处理暂时性网络错误、限流和服务端错误，最多尝试 5 次，失败时保留任务，不重传已经确认的分片。每次尝试上限 15 分钟，单次 SDK 操作总上限 90 分钟；这些不是整个文件上传的总时限。
@@ -136,3 +142,43 @@ pnpm tauri build
 也可在没有 `.env` 的情况下构建通用安装包，安装后通过上述运行时 `.env` 配置。缺少必填项时应用会显示错误并禁用上传。
 
 **带入构建的密钥可从分发的应用中提取，请仅向可信使用者分发带有凭证的安装包。面向其他使用者分发时，建议构建不含凭证的通用包，由使用者自行提供 `.env`。**
+
+## GitHub Actions 跨平台打包
+
+已提供 [构建工作流](.github/workflows/build.yml)，通过 GitHub 托管的构建机生成以下安装包，无需在本地准备各系统环境：
+
+| 构建产物名称 | 系统与架构 | 安装包 |
+| --- | --- | --- |
+| `otacast-windows-x64` | Windows x64 | NSIS `-setup.exe` |
+| `otacast-linux-x64` | Linux x64 | `.deb`、`.rpm`、`.AppImage` |
+| `otacast-macos-arm64` | macOS Apple 芯片 | `.dmg` |
+| `otacast-macos-x64` | macOS Intel | `.dmg` |
+
+### 首次配置
+
+1. 在 GitHub 新建空仓库，不勾选初始化 README、License 或 `.gitignore`。可以使用私有仓库。
+2. 将代码及工作流提交到本地 Git，再推送到 GitHub。当前项目的 `origin` 指向 Gitee，可另加名为 `github` 的远程地址，保留 Gitee 配置。将下方 `YOUR_USER` 替换为自己的 GitHub 用户名；仓库名按实际修改：
+
+   ```bash
+   git remote add github https://github.com/YOUR_USER/otacast.git
+   git push github main
+   ```
+
+   推送只包含已提交的代码。当前功能修改及其依赖的新文件也需要一并提交；不要提交 `.env` 或凭证。之后可分别执行 `git push github main` 和 `git push origin main`，同步到 GitHub 与 Gitee。
+
+3. 确认 GitHub 默认分支（通常是 `main`）已经包含 `.github/workflows/build.yml`。如仓库禁用了 Actions，在 `Settings → Actions → General` 启用，并允许此工作流引用的 Actions。
+
+### 触发与下载
+
+1. 进入 GitHub 仓库的 `Actions` 页面。
+2. 左侧选择 `Build desktop installers`，点击 `Run workflow`，选择分支后再次点击 `Run workflow`。
+3. 打开新生成的运行记录，查看四个构建任务的进度。首次构建需要下载和编译 Rust 依赖，后续运行会使用缓存。
+4. 构建完成后，在本次运行的 `Artifacts` 区域下载所需系统的压缩包，解压后即可取得安装包。产物保留 14 天，下载需要登录有仓库读取权限的 GitHub 账号。
+
+工作流仅手动触发，生成下载产物，不创建 GitHub Release。如果任务失败，打开对应任务并展开红色的步骤查看日志；其他平台会继续构建。
+
+CI 使用固定版本的 pnpm、前端锁文件和 Cargo 锁文件构建。无需配置 S3 Secrets；工作流要求仓库根目录不存在 `.env`，生成不含 S3 凭证的通用安装包，安装后按上文配置运行时 `.env`。
+
+当前 Windows 包未配置代码签名；macOS 采用不需要证书的 ad-hoc 签名，未公证，下载后仍可能被系统安全机制拦截。正式对外发布前需另外配置开发者证书及 macOS 公证。
+
+参考：[Tauri GitHub Actions](https://v2.tauri.app/distribute/pipelines/github/)、[GitHub 手动运行工作流](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow)、[下载构建产物](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts)。

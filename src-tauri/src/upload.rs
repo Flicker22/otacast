@@ -1158,13 +1158,33 @@ pub async fn discard_upload(
     let store = store_for(&app)?;
     let _lock = writer_lock(&store)?;
     let mut task = store.load(&task_id)?;
-    let settings = S3Config::load()?;
+    discard_task(&mut task, &store, S3Config::load).await
+}
+
+async fn discard_task(
+    task: &mut Task,
+    store: &Store,
+    load_settings: impl FnOnce() -> Result<S3Config, String>,
+) -> Result<(), String> {
+    // Single PUTs and multipart tasks without a saved upload ID have no known
+    // remote multipart upload to abort. Removing their journal needs no config.
+    // Already committed objects are always preserved, just as in cleanup().
+    if task.upload_id.is_none() {
+        return store.remove(&task.id);
+    }
+    let settings = load_settings()?;
     if task.target != Target::from(&settings) {
-        return Err("请切换回此任务的存储配置后清理".into());
+        return Err(format!(
+            "此任务有远端分片，请将 .env 恢复为 S3_BUCKET={}、S3_REGION={}、S3_ENDPOINT={}、S3_FORCE_PATH_STYLE={}，重新加载配置后清理",
+            task.target.bucket,
+            task.target.region,
+            task.target.endpoint.as_deref().unwrap_or("（留空，使用 AWS 默认地址）"),
+            task.target.force_path_style,
+        ));
     }
     task.phase = "cleanup_pending".into();
-    store.save(&task)?;
-    cleanup(&client(&settings), &task, &store).await
+    store.save(task)?;
+    cleanup(&client(&settings), task, store).await
 }
 
 #[tauri::command]
