@@ -30,7 +30,9 @@
 
 兼容服务若不支持 SHA-256，可在「上传路径与存储配置」中手动关闭后新建任务。此时明确显示「仅核对远端大小，未验证内容完整性」，不会自动降级；已有任务的校验方式保持不变。上传后的 HEAD 校验不验证 CDN 下载地址的权限和缓存配置。
 
-凭证需要指定上传目录的 `s3:PutObject`、`s3:GetObject`、`s3:ListMultipartUploadParts` 和 `s3:AbortMultipartUpload` 权限；返回版本 ID 时还需要 `s3:GetObjectVersion`。使用 SSE-KMS 时还需按服务要求授予 KMS 权限。兼容服务的权限名称可能不同。
+新建上传统一设置对象 ACL 为 `public-read`（公共读）：任何人可读取文件，写入仍需授权；普通上传和分片上传均适用。存储服务必须启用对象 ACL 并允许公共读，否则上传会失败。此设置不会追溯修改已上传对象或已创建的分片任务。
+
+凭证需要指定上传目录的 `s3:PutObject`、`s3:PutObjectAcl`、`s3:GetObject`、`s3:ListMultipartUploadParts` 和 `s3:AbortMultipartUpload` 权限；返回版本 ID 时还需要 `s3:GetObjectVersion`。使用 SSE-KMS 时还需按服务要求授予 KMS 权限。兼容服务的权限名称可能不同。
 
 建议为 Bucket 配置 `AbortIncompleteMultipartUpload` 生命周期规则，例如清理 7 天未完成的分片；超过保留期的任务将无法续传。规则也用于兜底处理创建上传后响应丢失、进程崩溃或本地磁盘写入失败产生的分片。请通过存储服务控制台设置，应用不会修改桶策略。发布文件建议采用版本目录，避免覆盖同名对象。
 
@@ -116,7 +118,9 @@ S3_SEND_CHECKSUM_HEADERS=true
 
 `S3_BUCKET`、`S3_ACCESS_KEY_ID`、`S3_SECRET_ACCESS_KEY` 必填。`S3_REGION` 默认 `us-east-1`；`S3_FORCE_PATH_STYLE` 仅接受 `true` 或 `false`，MinIO 等服务可按需设为 `true`。默认上传目录仍可在界面调整。
 
-文件 URL 优先使用 `S3_PUBLIC_BASE_URL` 拼接上传路径；留空时按 AWS S3 或自定义 Endpoint 的访问方式生成，并对中文、空格等路径字符编码。访问域名和 Endpoint 不应包含凭证、查询参数或片段。上传路径可在「上传路径与存储配置」中修改。链接的访问权限由对象存储或 CDN 配置决定，私有 Bucket 的直接链接需要相应访问权限。
+文件 URL 优先使用 `S3_PUBLIC_BASE_URL` 拼接上传路径；留空时按 AWS S3 或自定义 Endpoint 的访问方式生成，并对中文、空格等路径字符编码。访问域名和 Endpoint 不应包含凭证、查询参数或片段。上传路径可在「上传路径与存储配置」中修改。新建上传使用公共读 ACL，链接的实际访问还受对象存储的公共访问限制及 CDN 配置影响。
+
+如果厂商提供的文件访问地址是 `https://endpoint/上传路径`，不需要在域名前或路径中拼接 Bucket 名称，请设置 `S3_PUBLIC_BASE_URL=https://endpoint`。该配置直接拼接上传路径，不再自动添加 Bucket；`S3_BUCKET`、`S3_ENDPOINT` 和 `S3_FORCE_PATH_STYLE` 仍按厂商的上传接口要求配置。修改后点击「重新加载配置」，新建上传将使用新的文件访问地址。
 
 配置由 Rust 后端读取，界面只显示 Bucket、Region 和 Endpoint，不接收密钥。`.env` 及其变体已加入 Git 忽略列表，只有 `.env.example` 提交到仓库。不要给密钥添加 `VITE_` 前缀。
 

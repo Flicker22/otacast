@@ -376,6 +376,10 @@ fn respond(r: Request, state: &mut FakeState) -> Response {
         return response;
     }
     if r.method == "POST" && query.contains_key("uploads") {
+        assert_eq!(
+            r.headers.get("x-amz-acl").map(String::as_str),
+            Some("public-read")
+        );
         if state.reject_checksum && r.headers.contains_key("x-amz-checksum-algorithm") {
             return Response::error(400, "NotImplemented");
         }
@@ -467,6 +471,10 @@ fn respond(r: Request, state: &mut FakeState) -> Response {
         return Response::xml(204, String::new());
     }
     if r.method == "PUT" {
+        assert_eq!(
+            r.headers.get("x-amz-acl").map(String::as_str),
+            Some("public-read")
+        );
         state.single = true;
         state.committed = true;
         state.task_id = r.headers.get("x-amz-meta-otacast-task").unwrap().clone();

@@ -13,6 +13,7 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{
         ChecksumAlgorithm, ChecksumMode, ChecksumType, CompletedMultipartUpload, CompletedPart,
+        ObjectCannedAcl,
     },
     Client,
 };
@@ -677,6 +678,7 @@ async fn multipart(
             .create_multipart_upload()
             .bucket(&task.target.bucket)
             .key(&task.key)
+            .acl(ObjectCannedAcl::PublicRead)
             .metadata("otacast-task", &task.id);
         if task.checksum && task.remote_checksums {
             request = request
@@ -838,6 +840,7 @@ async fn single(
         .put_object()
         .bucket(&task.target.bucket)
         .key(&task.key)
+        .acl(ObjectCannedAcl::PublicRead)
         .content_length(task.file_info.file_size as i64)
         .metadata("otacast-task", &task.id)
         .body(body);
